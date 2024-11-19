@@ -115,26 +115,6 @@ void implementation(const int32_t *d_input, int32_t *d_output, size_t size)
     // Copy input data from device to host for printing
     cudaMemcpy(h_input, d_input, size * sizeof(int32_t), cudaMemcpyDeviceToHost);
 
-    // // Print original input array
-    // printf("Original Input Array:\n");
-    // for (size_t i = 0; i < size; ++i)
-    // {
-    //     printf("%d ", h_input[i]);
-    // }
-    // printf("\n");
-
-    // // Compute CPU sequential inclusive scan
-    // cpu_inclusive_scan(h_input, h_cpu_output, size);
-
-    // // Print CPU sequential scan output
-    // printf("CPU Sequential Inclusive Scan Output:\n");
-    // for (size_t i = 0; i < size; ++i)
-    // {
-    //     printf("%d ", h_cpu_output[i]);
-    // }
-    // printf("\n");
-
-    // Start of GPU implementation
 
     // Allocate temporary device memory
     int32_t *d_data;
@@ -184,14 +164,7 @@ void implementation(const int32_t *d_input, int32_t *d_output, size_t size)
             cudaDeviceSynchronize();
         }
     }
-
-    // Adjust for Inclusive Scan
-    // Since we started with the input array, and the scan is now exclusive, we need to adjust
-    // For inclusive scan, shift the results right and add the original input
-    // We can use a kernel to do this adjustment
-
     
-
     // Launch the kernel to adjust for inclusive scan
     blocksPerGrid = (n + threadsPerBlock - 1) / threadsPerBlock;
     inclusive_adjust_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_data, d_input, d_output, n);
@@ -199,14 +172,6 @@ void implementation(const int32_t *d_input, int32_t *d_output, size_t size)
 
     // Copy GPU output back to host for debugging
     cudaMemcpy(h_gpu_output, d_output, n * sizeof(int32_t), cudaMemcpyDeviceToHost);
-
-    // // Print GPU inclusive scan output
-    // printf("GPU Inclusive Scan Output:\n");
-    // for (size_t i = 0; i < n; ++i)
-    // {
-    //     printf("%d ", h_gpu_output[i]);
-    // }
-    // printf("\n");
 
     // Free temporary memory
     cudaFree(d_data);
