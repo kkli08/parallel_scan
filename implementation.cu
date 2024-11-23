@@ -9,12 +9,10 @@ void printSubmissionInfo()
     // Please modify this field with something interesting
     char nick_name[] = "Kenji-Fujima";
 
-
     // Please fill in your information (for marking purposes only)
     char student_first_name[] = "Damian";
     char student_last_name[] = "Li";
     char student_student_number[] = "1005842554";
-
 
     // Printing out team information
     printf("*******************************************************************************************************\n");
@@ -25,62 +23,126 @@ void printSubmissionInfo()
     printf("\tstudent_student_number: %s\n", student_student_number);
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// CUDA kernels for the Brent-Kung inclusive scan
+#define MAX_THREADS_PER_BLOCK 1024
 
-// Up-Sweep Kernel (Reduction Phase)
-__global__ void upsweep_kernel(int32_t *d_data, int stride, size_t n)
+// Kernel to perform per-block inclusive scan
+__global__ void block_inclusive_scan_kernel(const int32_t *d_input, int32_t *d_output, int32_t *d_block_sums, size_t n)
 {
-    // Calculate thread index
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    int index = (idx + 1) * stride * 2 - 1;
+    extern __shared__ int32_t s_data[];
 
-    if (index < n)
+    int tid = threadIdx.x;
+    int gid = blockIdx.x * blockDim.x + tid;
+
+    // Load data into shared memory
+    s_data[tid] = (gid < n) ? d_input[gid] : 0;
+
+    __syncthreads();
+
+    // Inclusive scan within the block using Kogge-Stone algorithm
+    for (int offset = 1; offset < blockDim.x; offset <<= 1)
     {
-        d_data[index] += d_data[index - stride];
+        int temp = 0;
+        if (tid >= offset)
+            temp = s_data[tid - offset];
+        __syncthreads();
+        s_data[tid] += temp;
+        __syncthreads();
+    }
+
+    // Write the scanned data to global memory
+    if (gid < n)
+    {
+        d_output[gid] = s_data[tid];
+    }
+
+    // Write the total sum of this block to d_block_sums
+    if (tid == blockDim.x - 1)
+    {
+        d_block_sums[blockIdx.x] = s_data[tid];
     }
 }
 
-// Down-Sweep Kernel (Distribution Phase)
-__global__ void downsweep_kernel(int32_t *d_data, int stride, size_t n)
+// Kernel to adjust the scanned data with the scanned block sums
+__global__ void adjust_with_block_sums_kernel(int32_t *d_output, const int32_t *d_scanned_block_sums, size_t n)
 {
-    // Calculate thread index
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    int index = (idx + 1) * stride * 2 - 1;
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (index < n)
+    if (gid < n && blockIdx.x > 0)
     {
-        int temp = d_data[index - stride];
-        d_data[index - stride] = d_data[index];
-        d_data[index] += temp;
+        d_output[gid] += d_scanned_block_sums[blockIdx.x - 1];
     }
 }
 
-// Copy Input to Temporary Array Kernel
-__global__ void copy_input_kernel(const int32_t *d_input, int32_t *d_data, size_t n)
+// Kernel to perform an inclusive scan on small arrays (fits within one block)
+__global__ void small_inclusive_scan_kernel(int32_t *d_input, int32_t *d_output, size_t n)
 {
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    if (idx < n)
+    extern __shared__ int32_t s_data[];
+
+    int tid = threadIdx.x;
+
+    // Load data into shared memory
+    s_data[tid] = (tid < n) ? d_input[tid] : 0;
+
+    __syncthreads();
+
+    // Inclusive scan within the block using Kogge-Stone algorithm
+    for (int offset = 1; offset < n; offset <<= 1)
     {
-        d_data[idx] = d_input[idx];
+        int temp = 0;
+        if (tid >= offset)
+            temp = s_data[tid - offset];
+        __syncthreads();
+        s_data[tid] += temp;
+        __syncthreads();
     }
-    else if (idx < n * 2) // For padding if necessary
+
+    // Write the scanned data back to global memory
+    if (tid < n)
     {
-        d_data[idx] = 0;
+        d_output[tid] = s_data[tid];
     }
 }
 
-// Adjusting the scan to be inclusive
-__global__ void inclusive_adjust_kernel(int32_t *d_data, const int32_t *d_input, int32_t *d_output, size_t n)
+// Recursive function to perform inclusive scan on the device
+void device_inclusive_scan(int32_t *d_input, int32_t *d_output, size_t n)
 {
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    if (idx < n)
+    int threadsPerBlock = 256;
+    int numBlocks = (n + threadsPerBlock - 1) / threadsPerBlock;
+
+    if (numBlocks <= 1)
     {
-        d_output[idx] = d_data[idx] + d_input[idx];
+        // The array fits in a single block
+        size_t sharedMemSize = threadsPerBlock * sizeof(int32_t);
+        small_inclusive_scan_kernel<<<1, threadsPerBlock, sharedMemSize>>>(d_input, d_output, n);
+        cudaDeviceSynchronize();
+    }
+    else
+    {
+        // Allocate device memory for block sums
+        int32_t *d_block_sums;
+        cudaMalloc(&d_block_sums, numBlocks * sizeof(int32_t));
+
+        // Perform per-block inclusive scan
+        size_t sharedMemSize = threadsPerBlock * sizeof(int32_t);
+        block_inclusive_scan_kernel<<<numBlocks, threadsPerBlock, sharedMemSize>>>(d_input, d_output, d_block_sums, n);
+        cudaDeviceSynchronize();
+
+        // Allocate device memory for scanned block sums
+        int32_t *d_scanned_block_sums;
+        cudaMalloc(&d_scanned_block_sums, numBlocks * sizeof(int32_t));
+
+        // Recursively scan the block sums
+        device_inclusive_scan(d_block_sums, d_scanned_block_sums, numBlocks);
+
+        // Adjust the output with scanned block sums
+        adjust_with_block_sums_kernel<<<numBlocks, threadsPerBlock>>>(d_output, d_scanned_block_sums, n);
+        cudaDeviceSynchronize();
+
+        // Free device memory
+        cudaFree(d_block_sums);
+        cudaFree(d_scanned_block_sums);
     }
 }
-
-////////////////////////////////////////////////////////////////////////////////
 
 /**
  * Implement your CUDA inclusive scan here. Feel free to add helper functions, kernels or allocate temporary memory.
@@ -93,60 +155,14 @@ __global__ void inclusive_adjust_kernel(int32_t *d_data, const int32_t *d_input,
  */
 void implementation(const int32_t *d_input, int32_t *d_output, size_t size)
 {
-    // Allocate temporary device memory
-    int32_t *d_data;
-    size_t n = size;
+    // Since d_input is const, we need to create a mutable copy for the recursive function
+    int32_t *d_input_copy;
+    cudaMalloc(&d_input_copy, size * sizeof(int32_t));
+    cudaMemcpy(d_input_copy, d_input, size * sizeof(int32_t), cudaMemcpyDeviceToDevice);
 
-    // Next power of two for array size
-    size_t padded_size = 1;
-    while (padded_size < n)
-        padded_size <<= 1;
-
-    cudaMalloc(&d_data, padded_size * sizeof(int32_t));
-
-    // Copy input data to temporary array
-    int threadsPerBlock = 256;
-    int blocksPerGrid = ((padded_size) + threadsPerBlock - 1) / threadsPerBlock;
-    copy_input_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_input, d_data, n);
-    cudaDeviceSynchronize();
-
-    // Up-Sweep (Reduction Phase)
-    int stride;
-    for (stride = 1; stride < padded_size; stride *= 2)
-    {
-        int numThreads = padded_size / (stride * 2);
-        if (numThreads > 0)
-        {
-            blocksPerGrid = (numThreads + threadsPerBlock - 1) / threadsPerBlock;
-            upsweep_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_data, stride, padded_size);
-            cudaDeviceSynchronize();
-        }
-    }
-
-    // Set last element to zero
-    if (padded_size > 1)
-    {
-        cudaMemset(d_data + padded_size - 1, 0, sizeof(int32_t));
-        cudaDeviceSynchronize();
-    }
-
-    // Down-Sweep (Distribution Phase)
-    for (stride = padded_size / 2; stride >= 1; stride /= 2)
-    {
-        int numThreads = padded_size / (stride * 2);
-        if (numThreads > 0)
-        {
-            blocksPerGrid = (numThreads + threadsPerBlock - 1) / threadsPerBlock;
-            downsweep_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_data, stride, padded_size);
-            cudaDeviceSynchronize();
-        }
-    }
-    
-    // Launch the kernel to adjust for inclusive scan
-    blocksPerGrid = (n + threadsPerBlock - 1) / threadsPerBlock;
-    inclusive_adjust_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_data, d_input, d_output, n);
-    cudaDeviceSynchronize();
+    // Perform inclusive scan
+    device_inclusive_scan(d_input_copy, d_output, size);
 
     // Free temporary device memory
-    cudaFree(d_data);
+    cudaFree(d_input_copy);
 }
