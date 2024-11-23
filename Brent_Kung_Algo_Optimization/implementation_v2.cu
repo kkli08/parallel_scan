@@ -3,6 +3,16 @@
 #include <stdio.h>
 #include <stdint.h>
 
+/*
+Remove Unnecessary Host-Device Memory Copies and Allocations
+
+Issue: The code allocates host memory and performs cudaMemcpy operations for debugging 
+purposes, which can significantly slow down the execution, especially with large input sizes.
+
+Improvement: Remove or conditionally compile out the host memory allocations and cudaMemcpy 
+calls used for debugging when not needed. This reduces memory overhead and data transfer time 
+between the host and device.
+*/
 void printSubmissionInfo()
 {
     // This will be published in the leaderboard on piazza
