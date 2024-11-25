@@ -1,3 +1,9 @@
+/*
+Performance Results:
+        Time consumed by the sequential implementation: 152142us
+        Time consumed by your implementation: 5488us
+        Optimization Speedup Ratio (nearest integer): 28
+*/
 #include "implementation.h"
 #include <cuda_runtime.h>
 #include <stdio.h>
@@ -56,13 +62,12 @@ __global__ void block_inclusive_scan_kernel(const int32_t *d_input, int32_t *d_o
     }
 }
 
-// CPU function to perform prefix scan
-void cpu_prefix_scan(const int32_t *input, int32_t *output, size_t n)
+// CPU function to perform sequential prefix addition (if needed)
+void cpu_prefix_add(int32_t *array, size_t n)
 {
-    output[0] = input[0];
     for (size_t i = 1; i < n; i++)
     {
-        output[i] = output[i - 1] + input[i];
+        array[i] += array[i - 1];
     }
 }
 
@@ -92,26 +97,29 @@ void implementation(const int32_t *d_input, int32_t *d_output, size_t size)
     block_inclusive_scan_kernel<<<numBlocks, threadsPerBlock, sharedMemSize>>>(d_input, d_output, d_block_sums, size);
     cudaDeviceSynchronize();
 
-    // Copy block sums to host memory
+    // Kernel 2: Inclusive scan on block sums
+    block_inclusive_scan_kernel<<<1, threadsPerBlock, numBlocks * sizeof(int32_t)>>>(d_block_sums, d_block_sums, NULL, numBlocks);
+    cudaDeviceSynchronize();
+
+    // Copy block sums to host memory for sequential addition
     int32_t *h_block_sums = (int32_t *)malloc(numBlocks * sizeof(int32_t));
     cudaMemcpy(h_block_sums, d_block_sums, numBlocks * sizeof(int32_t), cudaMemcpyDeviceToHost);
 
-    // CPU prefix scan on block sums
-    int32_t *h_scanned_block_sums = (int32_t *)malloc(numBlocks * sizeof(int32_t));
-    cpu_prefix_scan(h_block_sums, h_scanned_block_sums, numBlocks);
+    // CPU sequential addition (only necessary if final adjustments are needed)
+    cpu_prefix_add(h_block_sums, numBlocks);
 
-    // Copy scanned block sums back to device memory
-    int32_t *d_scanned_block_sums;
-    cudaMalloc(&d_scanned_block_sums, numBlocks * sizeof(int32_t));
-    cudaMemcpy(d_scanned_block_sums, h_scanned_block_sums, numBlocks * sizeof(int32_t), cudaMemcpyHostToDevice);
+    // Copy updated block sums back to device
+    cudaMemcpy(d_block_sums, h_block_sums, numBlocks * sizeof(int32_t), cudaMemcpyHostToDevice);
 
-    // Kernel 2: Adjust with scanned block sums
-    adjust_with_block_sums_kernel<<<numBlocks, threadsPerBlock>>>(d_output, d_scanned_block_sums, size);
+    // Kernel 3: Adjust the block sums with the fully scanned block sums
+    adjust_with_block_sums_kernel<<<1, threadsPerBlock>>>(d_block_sums, d_block_sums, numBlocks);
+    cudaDeviceSynchronize();
+
+    // Kernel 4: Adjust final output with scanned block sums
+    adjust_with_block_sums_kernel<<<numBlocks, threadsPerBlock>>>(d_output, d_block_sums, size);
     cudaDeviceSynchronize();
 
     // Free allocated memory
     free(h_block_sums);
-    free(h_scanned_block_sums);
     cudaFree(d_block_sums);
-    cudaFree(d_scanned_block_sums);
 }
