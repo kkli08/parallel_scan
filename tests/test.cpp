@@ -63,6 +63,8 @@ int main() {
             std::cout << "Mismatch at index " << i << ": GPU output " << h_output[i]
                       << ", CPU output " << h_cpu_output[i] << std::endl;
             break;
+        } else{
+            // std::cout << "At " << i <<" prefix sum ==  " << h_output[i] << std::endl;
         }
     }
 
