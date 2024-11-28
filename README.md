@@ -16,8 +16,8 @@ Timing breakdown:
 ```shell
 *******************************************************************************************************
 Performance Results:
-        Time consumed by the sequential implementation: 152052us
-        Time consumed by my implementation: 10124us
-        Optimization Speedup Ratio (nearest integer): 15
+        Time consumed by the sequential implementation: 152142us
+        Time consumed by your implementation: 5488us
+        Optimization Speedup Ratio (nearest integer): 28
 *******************************************************************************************************
 ```
